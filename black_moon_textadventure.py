@@ -1,4 +1,4 @@
-import pygame, json, os, sys
+import pygame, json, os, sys, random
 
 # =========================
 # Config
@@ -12,6 +12,11 @@ pygame.init()
 screen = pygame.display.set_mode((WIDTH, HEIGHT))
 pygame.display.set_caption("Black Moon — The Pixel Adventure")
 clock = pygame.time.Clock()
+
+# === Arcade: special scene key ===
+ARCADE_SCENE_KEY = "__ARCADE__"
+ARCADE_TURBO_KEY = "__ARCADE_TURBO__"
+
 
 # =========================
 # Fonts & Colors
@@ -180,7 +185,8 @@ def new_game_state():
         "suspicion": 0,
         "solo": False,
         "killed_henchmen": 0,
-        "ending": None
+        "ending": None,
+        "return_scene": None,   # <-- NYTT: behövs för Arcade Mode
     }
 
 # =========================
@@ -238,20 +244,42 @@ SCENES = {
              "goto":"S4", "effects":[{"op":"inc","key":"suspicion","value":1},{"op":"inc","key":"days_left","value":-1}]}
         ]
     },
-    "S4": {
-        "title": {"sv":"Restaurangen","en":"The Restaurant"},
-        "image": "scene_04.png",
-        "text": {
-            "sv":"Windom anländer till en fin restaurang. Du spanar – men Nina och hennes liga stjäl bilarna, inklusive Black Moon, direkt från trailern.",
-            "en":"Windom arrives at a plush restaurant. You stake it out—but Nina’s crew steals every car, including Black Moon right off the trailer."
-        },
-        "options": [
-            {"label":{"sv":"Kasta dig i jakt, följ spåren till ett kontorstorn.","en":"Dive into a chase, follow the trail to an office tower."},
-             "goto":"S5A", "effects":[{"op":"inc","key":"suspicion","value":1}]},
-            {"label":{"sv":"Spåra metodiskt via kameror och register.","en":"Track methodically via cameras and records."},
-             "goto":"S5B"}
-        ]
+ "S4": {
+    "title": {"sv":"Restaurangen","en":"The Restaurant"},
+    "image": "scene_04.png",
+    "text": {
+        "sv":"Windom anländer till en fin restaurang. Du spanar – men Nina och hennes liga stjäl bilarna, inklusive Black Moon, direkt från trailern.",
+        "en":"Windom arrives at a plush restaurant. You stake it out—but Nina’s crew steals every car, including Black Moon right off the trailer."
     },
+    "options": [
+        {
+            "label": {
+                "sv":"Kasta dig i jakt, följ spåren till ett kontorstorn.",
+                "en":"Dive into a chase, follow the trail to an office tower."
+            },
+            "goto":"S5A",
+            "effects":[{"op":"inc","key":"suspicion","value":1}]
+        },
+        {
+            "label": {
+                "sv":"Spåra metodiskt via kameror och register.",
+                "en":"Track methodically via cameras and records."
+            },
+            "goto":"S5B"
+        },
+        {
+            "label": {
+                "sv": "Jaga efter Nina genom staden (Arcade Mode).",
+                "en": "Chase Nina through the city (Arcade Mode)."
+            },
+            "goto": "__ARCADE__", 
+            "effects": [
+                {"op":"set","key":"return_scene","value":"S5A"}
+            ]
+        }
+    ]
+},
+
     "S5A": {
         "title": {"sv":"Garagejakten","en":"The Garage Chase"},
         "image": "scene_05.png",
@@ -335,15 +363,27 @@ SCENES = {
             {"label":{"sv":"Lämna henne. Tiden är knapp.","en":"Leave her. Time is critical."}, "goto":"S11B"}
         ]
     },
-    "S11": {
-        "title": {"sv":"Chop shop-kuppen","en":"Chop Shop Heist"},
-        "image": "scene_11.png",
-        "text": {
-            "sv":"I stulna uniformer rullar ni ut Black Moon. Windom spränger porten men nödgaller faller. Ni kör in i lasthissen mot Rylands våningsplan.",
-            "en":"In stolen uniforms you roll out Black Moon. Windom blows the door but emergency bars drop. You drive into the freight elevator toward Ryland’s floor."
-        },
-        "options": [{"label":{"sv":"Aktivera turbon – rakt mot fönstret!","en":"Hit turbo—straight at the window!"}, "goto":"S12"}]
+  "S11": {
+    "title": {"sv":"Chop shop-kuppen","en":"Chop Shop Heist"},
+    "image": "scene_11.png",
+    "text": {
+        "sv":"I stulna uniformer rullar ni ut Black Moon. Windom spränger porten men nödgaller faller. Ni kör in i lasthissen mot Rylands våningsplan.",
+        "en":"In stolen uniforms you roll out Black Moon. Windom blows the door but emergency bars drop. You drive into the freight elevator toward Ryland’s floor."
     },
+    "options": [
+        {
+            "label": {
+                "sv": "Aktivera turbon och samla kraft för att flyga genom fönstret (Arcade Mode).",
+                "en": "Activate turbo and gather power to fly through the window (Arcade Mode)."
+            },
+            "goto": "__ARCADE_TURBO__",
+            "effects": [
+                {"op": "set", "key": "return_scene", "value": "S12"}
+            ]
+        }
+    ]
+},
+
     "S11B": {
         "title": {"sv":"Solo i kaoset","en":"Solo in the Chaos"},
         "image": "scene_11.png",
@@ -412,6 +452,258 @@ SCENES = {
 # =========================
 # Rendering & state updates
 # =========================
+
+def run_arcade(state, duration_sec=18, max_hits=3, obstacle_speed=10, car_speed=9):
+    """Enkel 2D-biljakt: vänster/höger för att undvika hinder och jaga Nina.
+       Överlev duration_sec sekunder. Vid max_hits krockar: -1 health.
+       Returnerar uppdaterat state och hoppar tillbaka till state['return_scene']."""
+    import random  # säkerställ slump även om det inte är importerat globalt
+
+    # --- Spelarbil (rektangel eller sprite) ---
+    car = pygame.Rect(WIDTH//2 - 26, HEIGHT - 120, 52, 90)
+    car_img = None
+    try:
+        car_img = pygame.image.load(os.path.join(ASSETS_DIR, "arcade_car.png")).convert_alpha()
+        car_img = pygame.transform.smoothscale(car_img, (car.w, car.h))
+    except:
+        car_img = None  # fallback till rektangel
+
+    # --- Hinder (rektangel eller sprite) ---
+    obstacles = []
+    obs_img = None
+    try:
+        obs_img = pygame.image.load(os.path.join(ASSETS_DIR, "arcade_obstacle.png")).convert_alpha()
+        obs_img = pygame.transform.smoothscale(obs_img, (50, 50))
+    except:
+        obs_img = None
+
+    # --- Ninas bil: dyker upp ibland framåt på vägen ---
+    nina_rect = pygame.Rect(WIDTH//2 - 26, HEIGHT//2 - 100, 52, 90)
+    nina_img = None
+    nina_timer = 0  # frames kvar som Nina syns
+    try:
+        nina_img = pygame.image.load(os.path.join(ASSETS_DIR, "nina_car.png")).convert_alpha()
+        nina_img = pygame.transform.smoothscale(nina_img, (nina_rect.w, nina_rect.h))
+    except:
+        nina_img = None  # fallback till färgad rektangel
+
+    spawn_timer_ms = 0
+    hits = 0
+    start_ticks = pygame.time.get_ticks()
+    running = True
+
+    while running:
+        dt = clock.tick(FPS)
+        for event in pygame.event.get():
+            if event.type == pygame.QUIT:
+                pygame.quit(); sys.exit()
+            elif event.type == pygame.KEYDOWN and event.key == pygame.K_ESCAPE:
+                # Avbryt: ingen extra straff förutom utebliven vinst
+                running = False
+
+        # --- Input / rörelse: snabbare sidofart ---
+        keys = pygame.key.get_pressed()
+        if keys[pygame.K_LEFT] or keys[pygame.K_a]:
+            car.x -= car_speed
+        if keys[pygame.K_RIGHT] or keys[pygame.K_d]:
+            car.x += car_speed
+        car.x = max(0, min(WIDTH - car.w, car.x))
+
+        # --- Spawn hinder med intervall (ms) ---
+        spawn_timer_ms += dt
+        if spawn_timer_ms > 700:
+            spawn_timer_ms = 0
+            ox = random.randint(20, WIDTH - 70)
+            obstacles.append(pygame.Rect(ox, -60, 50, 50))
+
+        # --- Uppdatera hinder + kollisioner ---
+        for o in obstacles:
+            o.y += obstacle_speed
+        for o in obstacles[:]:
+            if o.colliderect(car):
+                hits += 1
+                obstacles.remove(o)
+        obstacles = [o for o in obstacles if o.y < HEIGHT + 60]
+
+        # --- Slumpa Ninas närvaro (ca var 4–6:e sekund) ---
+        # Visas i ~2 sek (120 frames @ 60fps)
+        if nina_timer <= 0 and random.randint(0, 300) == 1:
+            nina_rect.x = random.randint(int(WIDTH*0.25), int(WIDTH*0.75) - nina_rect.w)
+            nina_rect.y = HEIGHT//2 - random.randint(80, 140)
+            nina_timer = 120
+        else:
+            if nina_timer > 0:
+                nina_timer -= 1
+
+        # --- Rita scen ---
+        screen.fill((6, 8, 14))
+        # väg
+        pygame.draw.rect(screen, (20, 22, 30), (int(WIDTH*0.18), 0, int(WIDTH*0.64), HEIGHT))
+        # mittstreck (scroll)
+        scroll = (pygame.time.get_ticks() // 6) % 40
+        for y in range(-40, HEIGHT, 40):
+            pygame.draw.rect(screen, (200,200,220), (WIDTH//2 - 5, y + scroll, 10, 20))
+
+        # hinder
+        for o in obstacles:
+            if obs_img: screen.blit(obs_img, o)
+            else: pygame.draw.rect(screen, (170, 80, 80), o)
+
+        # Nina (om aktiv)
+        if nina_timer > 0:
+            if nina_img: screen.blit(nina_img, nina_rect)
+            else: pygame.draw.rect(screen, (255, 200, 50), nina_rect)
+
+        # spelarbilen
+        if car_img: screen.blit(car_img, car)
+        else: pygame.draw.rect(screen, (80, 180, 120), car)
+
+        # HUD
+        secs = (pygame.time.get_ticks() - start_ticks) // 1000
+        left = max(0, duration_sec - secs)
+        hud = f"Time {left}s   Hits {hits}/{max_hits}"
+        hud_surf = FONT_UI.render(hud, True, (230,235,255))
+        screen.blit(hud_surf, (16, 14))
+
+        pygame.display.flip()
+
+        # --- Slutvillkor ---
+        if hits >= max_hits:
+            state["health"] = max(0, state["health"] - 1)
+            running = False
+        if left <= 0:
+            running = False
+
+    # Tillbaka till scen efter arkad
+    state["scene"] = state.get("return_scene", "S5A")
+    state["return_scene"] = None
+    return state
+
+def run_arcade_turbo(state, needed=10, max_hits=3, speed_px=7):
+    """Arcade Turbo Mode: samla turbopaket för att aktivera hoppet mellan tornen."""
+    car = pygame.Rect(WIDTH//2 - 26, HEIGHT - 120, 52, 90)
+    obstacles = []
+    pickups = []
+    spawn_timer = 0
+    pickup_timer = 0
+    hits = 0
+    collected = 0
+
+    # Ladda grafik om det finns
+    car_img = None
+    obs_img = None
+    pick_img = None
+    try:
+        car_img = pygame.image.load(os.path.join(ASSETS_DIR, "arcade_car.png")).convert_alpha()
+        car_img = pygame.transform.smoothscale(car_img, (car.w, car.h))
+    except: pass
+    try:
+        obs_img = pygame.image.load(os.path.join(ASSETS_DIR, "arcade_obstacle.png")).convert_alpha()
+        obs_img = pygame.transform.smoothscale(obs_img, (50, 50))
+    except: pass
+    try:
+        pick_img = pygame.image.load(os.path.join(ASSETS_DIR, "arcade_pickup.png")).convert_alpha()
+        pick_img = pygame.transform.smoothscale(pick_img, (40, 40))
+    except: pass
+
+    running = True
+    while running:
+        dt = clock.tick(FPS)
+        for event in pygame.event.get():
+            if event.type == pygame.QUIT:
+                pygame.quit(); sys.exit()
+            elif event.type == pygame.KEYDOWN and event.key == pygame.K_ESCAPE:
+                running = False
+
+        keys = pygame.key.get_pressed()
+        if keys[pygame.K_LEFT] or keys[pygame.K_a]:
+            car.x -= 7
+        if keys[pygame.K_RIGHT] or keys[pygame.K_d]:
+            car.x += 7
+        car.x = max(0, min(WIDTH - car.w, car.x))
+
+        # Spawn hinder
+        spawn_timer += dt
+        if spawn_timer > 800:
+            spawn_timer = 0
+            ox = random.randint(20, WIDTH - 70)
+            obstacles.append(pygame.Rect(ox, -60, 50, 50))
+
+        # Spawn pickups
+        pickup_timer += dt
+        if pickup_timer > 1500:
+            pickup_timer = 0
+            px = random.randint(40, WIDTH - 80)
+            pickups.append(pygame.Rect(px, -50, 40, 40))
+
+        # Rörelse
+        for o in obstacles:
+            o.y += speed_px
+        for p in pickups:
+            p.y += speed_px
+
+        # Kollisioner
+        for o in obstacles[:]:
+            if o.colliderect(car):
+                hits += 1
+                obstacles.remove(o)
+        for p in pickups[:]:
+            if p.colliderect(car):
+                collected += 1
+                pickups.remove(p)
+
+        # Ta bort gamla
+        obstacles = [o for o in obstacles if o.y < HEIGHT + 60]
+        pickups = [p for p in pickups if p.y < HEIGHT + 40]
+
+        # Rita scen
+        screen.fill((10, 12, 20))
+        pygame.draw.rect(screen, (30, 32, 44), (int(WIDTH*0.18), 0, int(WIDTH*0.64), HEIGHT))
+
+        # Mittlinje
+        for y in range(0, HEIGHT, 40):
+            pygame.draw.rect(screen, (200,200,220), (WIDTH//2 - 5, (y + (pygame.time.get_ticks()//6)%40), 10, 20))
+
+        # Rita hinder
+        for o in obstacles:
+            if obs_img: screen.blit(obs_img, o)
+            else: pygame.draw.rect(screen, (200,80,80), o)
+
+        # Rita pickups
+        for p in pickups:
+            if pick_img: screen.blit(pick_img, p)
+            else: pygame.draw.circle(screen, (80,200,240), p.center, 18)
+
+        # Rita bil
+        if car_img: screen.blit(car_img, car)
+        else: pygame.draw.rect(screen, (80,180,120), car)
+
+        # HUD: turbo-mätare
+        bar_w = 200
+        filled = int((collected / needed) * bar_w)
+        pygame.draw.rect(screen, (80,80,80), (20,20, bar_w, 22), border_radius=6)
+        pygame.draw.rect(screen, (120,220,120), (20,20, filled, 22), border_radius=6)
+        txt = FONT_UI.render(f"TURBO {collected}/{needed}", True, (230,230,255))
+        screen.blit(txt, (20, 50))
+
+        txt2 = FONT_UI.render(f"Hits {hits}/{max_hits}", True, (230,180,180))
+        screen.blit(txt2, (20, 75))
+
+        pygame.display.flip()
+
+        # Slutvillkor
+        if hits >= max_hits:
+            state["health"] = max(0, state["health"] - 1)
+            state["scene"] = "E_DEAD"
+            running = False
+        elif collected >= needed:
+            # Turbo aktiverad – cutscene: hoppa till nästa torn
+            state["scene"] = state.get("return_scene", "S11")
+            running = False
+
+    return state
+
+
 def apply_effects(state, effects):
     for e in effects or []:
         op, key, val = e.get("op"), e.get("key"), e.get("value")
@@ -523,14 +815,24 @@ def step_scene(state, choice_index):
         return state
     opt = options[choice_index]
 
-    # No automatic day loss; only explicit effects
+    # Tillämpa eventuella effekter
     apply_effects(state, opt.get("effects"))
 
     goto = opt.get("goto", state["scene"])
+
+    # Special: arcade
+    if goto == ARCADE_SCENE_KEY or goto == "__ARCADE__":
+        # Om return_scene inte redan sattes via effects, defaulta till S5A
+        if not state.get("return_scene"):
+            state["return_scene"] = "S5A"
+        return run_arcade(state)
+
+    # Vanliga slut
     if goto in ("E_GOOD","E_GREED","E_COWARD","E_TIME","E_DEAD"):
         state["scene"] = goto
         return state
 
+    # Normal scenväxling
     state["scene"] = goto
     return state
 
@@ -542,23 +844,39 @@ def run_game():
     running = True
     while running:
         clock.tick(FPS)
+
+        # --- input ---
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
                 running = False
+
             elif event.type == pygame.KEYDOWN:
                 if pygame.K_1 <= event.key <= pygame.K_9:
                     idx = event.key - pygame.K_1
                     state = step_scene(state, idx)
+
                 elif event.key == pygame.K_ESCAPE:
                     running = False
+
                 elif event.key == pygame.K_s:
                     save_game(state)
+
                 elif event.key == pygame.K_l:
                     loaded = load_game()
                     if loaded:
                         state = loaded
 
-        # Endings: show overlay, then back to start (keep chosen language)
+        # === ARCADE HOOKS (läggs direkt efter input-hanteringen) ===
+        if state["scene"] == "__ARCADE__":
+            state = run_arcade(state)          # vanlig chase-arcade
+            continue                           # rita inte textscen samma frame
+
+        if state["scene"] == "__ARCADE_TURBO__":
+            state = run_arcade_turbo(state)    # turbo-samlings-arcade
+            continue
+        # ===========================================================
+
+        # --- slutscener: visa overlay och tillbaka till start ---
         if state["scene"].startswith("E_"):
             show_end_and_wait_for_restart(state)
             start_img_path = os.path.join(ASSETS_DIR, "start_screen.png")
@@ -566,12 +884,13 @@ def run_game():
             state = new_game_state()
             continue
 
-        # Safety checks
+        # --- säkerhetskontroller ---
         if state["health"] <= 0:
             state["scene"] = "E_DEAD"
         if state["days_left"] <= 0 and not state["scene"].startswith("E_"):
             state["scene"] = "E_TIME"
 
+        # --- render ---
         draw_scene(state)
         pygame.display.flip()
 
